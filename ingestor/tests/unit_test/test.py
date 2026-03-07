@@ -1,8 +1,6 @@
-import pytest
-from datetime import datetime
-from models.dto.AlpacaTick import AlpacaTick
-from data_providers.AlpacaDataProvider import AlpacaDataProvider
-from models.schemas.NormalizedTick import NormalizedTick
+from ...data_providers.AlpacaDataProvider import AlpacaDataProvider
+from ...models.dto.AlpacaTick import AlpacaTick
+
 
 class TestAlpacaDataProvider:
 

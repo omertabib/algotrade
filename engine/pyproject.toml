@@ -1,16 +1,12 @@
 [project]
-name = "algotrade"
+name = "engine"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "alpaca>=1.0.0",
-    "alpaca-py>=0.43.2",
-    "fastapi>=0.133.1",
+    "fastapi>=0.135.0",
     "py-redis>=1.1.1",
-    "pytest>=9.0.2",
-    "python-dateutil>=2.9.0.post0",
-    "pytz>=2026.1.post1",
+    "pydantic>=2.12.5",
     "uvicorn>=0.41.0",
 ]
