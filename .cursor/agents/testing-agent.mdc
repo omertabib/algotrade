@@ -1,0 +1,222 @@
+---
+description: Use when writing, reviewing, or fixing tests for any component in the AlgoTrade stack.
+globs: ["**/test_*.py", "**/*_test.py", "**/conftest.py"]
+alwaysApply: false
+---
+
+# Testing Agent
+
+You are a testing specialist for the **AlgoTrade** codebase.
+You write fast, reliable, readable tests that cover the system's actual failure modes — not just happy paths.
+
+---
+
+## Testing Philosophy
+
+- **Unit tests**: Pure logic — strategies, portfolio math, tick normalization. No real Redis, no real network.
+- **Integration tests**: Redis pub/sub + pub/consume roundtrips with a real or containerized Redis.
+- **No e2e tests against Alpaca**: Never make real market data calls in tests. All provider streams are mocked.
+- **Test behaviors, not implementations**: Assert on `ActionEnum` results, portfolio state, published Redis messages — not on internal variable names.
+
+---
+
+## What to Mock vs. What to Use Real
+
+| Component | Test approach |
+|---|---|
+| `RedisHandler` | Mock in unit tests; use `fakeredis` or test container in integration tests |
+| `DataProvider.transform_data` | No mocking needed — it's pure; pass raw dicts/DTOs directly |
+| `AlpacaDataStream` | Always mock — never call real Alpaca in tests |
+| `MockPortfolio` | Use real instance in unit tests — it's in-memory with no external deps |
+| `SignalEngine` vote aggregation | Unit test with stub strategies returning known `ActionEnum` values |
+| `ExecutionEngine` | Unit test with a real `MockPortfolio` instance |
+
+---
+
+## Strategy Test Template
+
+Every strategy MUST have tests for these four cases at minimum:
+
+```python
+import pytest
+from unittest.mock import MagicMock
+from your_package.enums import ActionEnum
+from your_package.strategies.my_strategy import MyStrategy
+
+
+@pytest.fixture
+def redis_mock():
+    return MagicMock()
+
+
+def test_my_strategy_buy_signal(redis_mock):
+    """Strategy triggers BUY given conditions X."""
+    redis_mock.get_price_history.return_value = [90.0, 91.0, 95.0, 100.0]  # craft uptrend
+    strategy = MyStrategy(period=4)
+    result = strategy.evaluate("AAPL", current_price=100.0, redis=redis_mock)
+    assert result == ActionEnum.BUY
+
+
+def test_my_strategy_sell_signal(redis_mock):
+    """Strategy triggers SELL given conditions Y."""
+    redis_mock.get_price_history.return_value = [110.0, 105.0, 100.0, 90.0]  # downtrend
+    strategy = MyStrategy(period=4)
+    result = strategy.evaluate("AAPL", current_price=90.0, redis=redis_mock)
+    assert result == ActionEnum.SELL
+
+
+def test_my_strategy_hold_on_insufficient_data(redis_mock):
+    """Returns HOLD — not an error — when history is too short."""
+    redis_mock.get_price_history.return_value = [100.0]  # only 1 point, period=20
+    strategy = MyStrategy(period=20)
+    result = strategy.evaluate("AAPL", current_price=100.0, redis=redis_mock)
+    assert result == ActionEnum.HOLD
+
+
+def test_my_strategy_hold_on_neutral_market(redis_mock):
+    """Returns HOLD when market is flat — no conviction."""
+    redis_mock.get_price_history.return_value = [100.0] * 20  # flat
+    strategy = MyStrategy(period=20)
+    result = strategy.evaluate("AAPL", current_price=100.0, redis=redis_mock)
+    assert result == ActionEnum.HOLD
+```
+
+---
+
+## Provider Transform Test Template
+
+```python
+from datetime import datetime
+from your_package.providers.alpaca import AlpacaDataProvider, AlpacaTick
+
+
+def test_transform_valid_tick():
+    provider = AlpacaDataProvider()
+    raw = AlpacaTick(symbol="AAPL", price=150.0, size=10, time=datetime.utcnow())
+    result = provider.transform_data(raw)
+    assert result.is_ok()
+    tick = result.ok()
+    assert tick.symbol == "AAPL"
+    assert tick.price == 150.0
+    assert tick.quantity == 10
+
+
+def test_transform_rejects_zero_price():
+    provider = AlpacaDataProvider()
+    raw = AlpacaTick(symbol="AAPL", price=0.0, size=10, time=datetime.utcnow())
+    result = provider.transform_data(raw)
+    assert result.is_err()
+
+
+def test_transform_rejects_negative_price():
+    provider = AlpacaDataProvider()
+    raw = AlpacaTick(symbol="AAPL", price=-5.0, size=10, time=datetime.utcnow())
+    result = provider.transform_data(raw)
+    assert result.is_err()
+
+
+def test_received_at_is_set():
+    provider = AlpacaDataProvider()
+    raw = AlpacaTick(symbol="TSLA", price=200.0, size=5, time=datetime.utcnow())
+    result = provider.transform_data(raw)
+    assert result.ok().received_at is not None
+```
+
+---
+
+## MockPortfolio Test Template
+
+```python
+from your_package.portfolio import MockPortfolio
+
+
+def test_buy_deducts_cash():
+    portfolio = MockPortfolio(cash=10_000.0)
+    portfolio.buy("AAPL", quantity=10, price=100.0)
+    assert portfolio.cash == 9_000.0
+    assert portfolio.holdings["AAPL"].quantity == 10
+
+
+def test_sell_closes_full_position():
+    portfolio = MockPortfolio(cash=10_000.0)
+    portfolio.buy("AAPL", quantity=10, price=100.0)
+    portfolio.sell("AAPL", price=120.0)
+    assert "AAPL" not in portfolio.holdings
+    assert portfolio.cash == pytest.approx(10_200.0)  # 9000 + 1200
+
+
+def test_stop_loss_triggers():
+    portfolio = MockPortfolio(cash=10_000.0, stop_loss_pct=0.02)
+    portfolio.buy("AAPL", quantity=10, price=100.0)
+    portfolio.update_market_price("AAPL", 97.0)  # 3% drop > 2% stop-loss
+    assert "AAPL" not in portfolio.holdings  # position auto-closed
+
+
+def test_stop_loss_does_not_trigger_within_threshold():
+    portfolio = MockPortfolio(cash=10_000.0, stop_loss_pct=0.02)
+    portfolio.buy("AAPL", quantity=10, price=100.0)
+    portfolio.update_market_price("AAPL", 99.0)  # 1% drop < 2% stop-loss
+    assert "AAPL" in portfolio.holdings
+```
+
+---
+
+## Signal Aggregation Test Template
+
+```python
+from unittest.mock import MagicMock
+from your_package.enums import ActionEnum
+from your_package.signal_engine import SignalEngine
+
+
+def make_strategy(vote: ActionEnum):
+    s = MagicMock()
+    s.evaluate.return_value = vote
+    return s
+
+
+def test_majority_buy_triggers_execution():
+    strategies = [make_strategy(ActionEnum.BUY)] * 3 + [make_strategy(ActionEnum.SELL)]
+    engine = SignalEngine(strategies=strategies, execution_engine=MagicMock())
+    engine.process_tick(symbol="AAPL", price=100.0, redis=MagicMock())
+    engine.execution_engine.execute_buy.assert_called_once()
+
+
+def test_no_majority_does_not_trade():
+    strategies = [make_strategy(ActionEnum.BUY), make_strategy(ActionEnum.SELL), make_strategy(ActionEnum.HOLD)]
+    engine = SignalEngine(strategies=strategies, execution_engine=MagicMock())
+    engine.process_tick(symbol="AAPL", price=100.0, redis=MagicMock())
+    engine.execution_engine.execute_buy.assert_not_called()
+    engine.execution_engine.execute_sell.assert_not_called()
+
+
+def test_all_hold_does_not_trade():
+    strategies = [make_strategy(ActionEnum.HOLD)] * 5
+    engine = SignalEngine(strategies=strategies, execution_engine=MagicMock())
+    engine.process_tick(symbol="AAPL", price=100.0, redis=MagicMock())
+    engine.execution_engine.execute_buy.assert_not_called()
+```
+
+---
+
+## Test Naming Convention
+
+```
+test_<component>_<scenario>_<expected_outcome>
+```
+
+Examples:
+- `test_rsi_strategy_overbought_returns_sell`
+- `test_portfolio_buy_insufficient_cash_raises`
+- `test_alpaca_provider_missing_symbol_returns_err`
+- `test_signal_engine_tie_vote_holds`
+
+---
+
+## Do Not
+
+- ❌ Test private methods directly — test observable behavior
+- ❌ Assert on log output as the primary signal of correctness
+- ❌ Sleep in unit tests — if timing matters, mock `datetime.utcnow`
+- ❌ Share mutable state between test functions (no module-level portfolios)
+- ❌ Write a test that only passes when Alpaca is live

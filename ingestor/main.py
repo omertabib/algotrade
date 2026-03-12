@@ -12,9 +12,28 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "YOUR_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "YOUR_SECRET_KEY")
 SYMBOLS_TO_TRACK = ["AAPL", "TSLA", "GOOG", "BTC/USD"]
 
+_PLACEHOLDER_KEY = "YOUR_API_KEY"
+_PLACEHOLDER_SECRET = "YOUR_SECRET_KEY"
+
+
+def _check_alpaca_credentials() -> None:
+    """Fail fast with a clear message if Alpaca credentials are missing or placeholder."""
+    if not ALPACA_API_KEY or ALPACA_API_KEY == _PLACEHOLDER_KEY:
+        raise ValueError(
+            "Alpaca API key not set. Set ALPACA_API_KEY in the environment "
+            "(e.g. export ALPACA_API_KEY=your_key or use a .env file)."
+        )
+    if not ALPACA_SECRET_KEY or ALPACA_SECRET_KEY == _PLACEHOLDER_SECRET:
+        raise ValueError(
+            "Alpaca secret key not set. Set ALPACA_SECRET_KEY in the environment "
+            "(e.g. export ALPACA_SECRET_KEY=your_secret or use a .env file)."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _check_alpaca_credentials()
+
     # 1. Initialize Redis Connection
     redis_client = RedisClient()
     await redis_client.connect()

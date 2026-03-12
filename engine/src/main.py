@@ -7,10 +7,15 @@ from src.execution_engine import ExecutionEngine
 from src.handlers.redis_handler import RedisHandler
 from src.mock_portfolio import MockPortfolio
 from src.signals_engine import SignalEngine
+from src.strategies.atr_volatility_breakout_strategy import ATRVolatilityBreakoutStrategy
 from src.strategies.bollinger_brands_strategy import BollingerBandsStrategy
+from src.strategies.donchian_channel_strategy import DonchianChannelStrategy
+from src.strategies.keltner_channel_strategy import KeltnerChannelStrategy
 from src.strategies.macd_strategy import MACDStrategy
 from src.strategies.price_alert_strategy import PriceAlertStrategy
+from src.strategies.pullback_to_ma_strategy import PullbackToMAStrategy
 from src.strategies.sma_crossover_strategy import SMACrossoverStrategy
+from src.strategies.tsmomentum_strategy import TSMomentumStrategy
 from src.strategies.vwap_strategy import VWAPStrategy
 from src.strategies.zscore_strategy import ZScoreStrategy
 
@@ -69,7 +74,45 @@ async def lifespan(app: FastAPI):
             symbol=symbol,
             strategy=ZScoreStrategy(symbol=symbol, redis_handler=redis_handler, period=config.get("slow", 30))
         )
-        await signal_engine.subscribe_to_symbol(symbol=symbol, strategy=VWAPStrategy(symbol, redis_handler))
+
+        # New strategies: Donchian, TSMomentum, Keltner, ATR Breakout, Pullback-to-MA
+        slow = config.get("slow", 30)
+        fast = config.get("fast", 5)
+        await signal_engine.subscribe_to_symbol(
+            symbol=symbol,
+            strategy=DonchianChannelStrategy(
+                symbol=symbol, redis_handler=redis_handler,
+                breakout_period=slow, exit_period=max(fast * 2, 10)
+            )
+        )
+        await signal_engine.subscribe_to_symbol(
+            symbol=symbol,
+            strategy=TSMomentumStrategy(
+                symbol=symbol, redis_handler=redis_handler,
+                momentum_lookback=slow, threshold_return=0.02
+            )
+        )
+        await signal_engine.subscribe_to_symbol(
+            symbol=symbol,
+            strategy=KeltnerChannelStrategy(
+                symbol=symbol, redis_handler=redis_handler,
+                ema_period=20, atr_period=14, multiplier=2.0
+            )
+        )
+        await signal_engine.subscribe_to_symbol(
+            symbol=symbol,
+            strategy=ATRVolatilityBreakoutStrategy(
+                symbol=symbol, redis_handler=redis_handler,
+                lookback_period=slow, atr_period=14, atr_multiplier=2.0
+            )
+        )
+        await signal_engine.subscribe_to_symbol(
+            symbol=symbol,
+            strategy=PullbackToMAStrategy(
+                symbol=symbol, redis_handler=redis_handler,
+                short_period=fast, long_period=slow, dip_pct=0.01, rally_pct=0.01
+            )
+        )
     task = asyncio.create_task(signal_engine.listen_and_process())
     yield
 

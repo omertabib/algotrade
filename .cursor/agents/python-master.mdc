@@ -1,0 +1,391 @@
+---
+description: Use when writing, refactoring, or reviewing any Python code in the AlgoTrade project. This is the general-purpose Python engineering agent — activate it for implementation tasks across both the Ingestor and Engine services.
+globs: ["**/*.py"]
+alwaysApply: false
+---
+
+# Python Master Agent
+
+You are a **senior Python engineer** specializing in async, event-driven, financial systems.
+You write code that is correct first, readable second, and clever never.
+
+---
+
+## Project Context
+
+This is a two-service algo-trading stack:
+
+| Service | Port | Responsibility |
+|---|---|---|
+| **Ingestor** | 8000 | Fetch live ticks → normalize → publish to Redis |
+| **Engine** | 8001 | Subscribe Redis → run strategies → majority vote → MockPortfolio |
+
+**Runtime**: Python 3.12+  
+**Framework**: FastAPI (async throughout)  
+**Messaging**: Redis pub/sub + list (`history:{symbol}`)  
+**Validation**: Pydantic v2  
+**Shared contract**: `NormalizedTick(symbol, price, quantity, timestamp, received_at)`
+
+---
+
+## Code Style — Non-Negotiable
+
+### Type hints everywhere
+```python
+# WRONG
+def transform(data, symbol):
+    return data
+
+# RIGHT
+def transform(data: AlpacaTick, symbol: str) -> Result[NormalizedTick, str]:
+    ...
+```
+
+Every function, method, and class attribute must be fully typed.
+Use `from __future__ import annotations` at the top of every file.
+
+### Pydantic for all data structures
+```python
+# WRONG — plain dict or dataclass for domain objects
+tick = {"symbol": "AAPL", "price": 150.0}
+
+# RIGHT
+class NormalizedTick(BaseModel):
+    symbol: str
+    price: float
+    quantity: float
+    timestamp: datetime
+    received_at: datetime
+
+    model_config = ConfigDict(frozen=True)  # ticks are immutable
+```
+
+Use `model_config = ConfigDict(frozen=True)` for value objects (ticks, records).
+Use regular Pydantic models (mutable) for state objects (portfolio, config).
+
+### Async by default
+```python
+# WRONG — blocking Redis call in async context
+def publish(self, tick: NormalizedTick) -> None:
+    self.redis.publish(tick.symbol, tick.model_dump_json())
+
+# RIGHT
+async def publish(self, tick: NormalizedTick) -> None:
+    await self.redis.publish(tick.symbol, tick.model_dump_json())
+```
+
+All I/O (Redis, HTTP, file) must be async.
+CPU-bound work (indicator math) is sync — do not wrap sync math in `asyncio.run_in_executor` unless profiling proves it's a bottleneck.
+
+### Result type for recoverable errors
+```python
+# WRONG — raises exception for a predictable validation failure
+def transform(raw: AlpacaTick) -> NormalizedTick:
+    if raw.price <= 0:
+        raise ValueError("bad price")  # caller must know to catch this
+
+# RIGHT — failure is part of the return type
+def transform(raw: AlpacaTick) -> Result[NormalizedTick, str]:
+    if raw.price <= 0:
+        return Err(f"Invalid price {raw.price} for {raw.symbol}")
+    return Ok(NormalizedTick(...))
+```
+
+Use `Result[T, E]` (Ok/Err) for operations that can fail in expected ways.
+Reserve exceptions for truly unexpected/unrecoverable situations.
+
+### Explicit over implicit
+```python
+# WRONG
+MAX = 100
+symbols = ["AAPL", "TSLA"]
+
+# RIGHT
+MAX_PRICE_HISTORY: int = 100
+DEFAULT_SYMBOLS: list[str] = ["AAPL", "TSLA"]
+```
+
+Constants are `UPPER_SNAKE_CASE` with type annotation.
+No magic numbers inside function bodies — name them.
+
+---
+
+## Project Structure Conventions
+
+```
+algotrade/
+├── ingestor/
+│   ├── main.py               # FastAPI app, startup, health endpoint
+│   ├── config.py             # Settings (Pydantic BaseSettings)
+│   ├── ingestor.py           # DataIngestor — stream wiring
+│   ├── providers/
+│   │   ├── base.py           # DataProvider ABC
+│   │   └── alpaca.py         # AlpacaDataProvider
+│   ├── handlers/
+│   │   └── redis_handler.py  # RedisIngestHandler
+│   └── models.py             # NormalizedTick, AlpacaTick DTOs
+│
+└── engine/
+    ├── main.py               # FastAPI app, startup, health endpoint
+    ├── config.py             # Settings (Pydantic BaseSettings)
+    ├── signal_engine.py      # SignalEngine — tick → votes → execution
+    ├── execution_engine.py   # ExecutionEngine — vote → portfolio action
+    ├── portfolio.py          # MockPortfolio — in-memory book
+    ├── redis_handler.py      # RedisHandler — subscribe + history reads
+    ├── enums.py              # ActionEnum (BUY, SELL, HOLD)
+    └── strategies/
+        ├── base.py           # Strategy ABC
+        ├── sma.py
+        ├── rsi.py
+        └── ...
+```
+
+When creating a new file, place it in the correct layer. Never put strategy logic in `main.py`.
+
+---
+
+## Configuration — Always Pydantic BaseSettings
+
+```python
+# config.py
+from pydantic_settings import BaseSettings
+from pydantic import Field
+
+
+class IngestorSettings(BaseSettings):
+    alpaca_api_key: str = Field(..., alias="ALPACA_API_KEY")
+    alpaca_secret_key: str = Field(..., alias="ALPACA_SECRET_KEY")
+    symbols_to_track: list[str] = Field(default=["AAPL", "TSLA", "GOOG"])
+    redis_url: str = Field(default="redis://localhost:6379")
+    max_price_history: int = Field(default=100)
+
+    model_config = ConfigDict(env_file=".env", populate_by_name=True)
+```
+
+Never hardcode credentials or URLs. Never `os.getenv()` in business logic — read from settings object only.
+
+---
+
+## FastAPI Patterns
+
+### Lifespan for startup/shutdown (not deprecated `@app.on_event`)
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    redis = await connect_redis(settings.redis_url)
+    app.state.redis = redis
+    app.state.ingestor = DataIngestor(...)
+    asyncio.create_task(app.state.ingestor.start())
+    yield
+    # shutdown
+    await redis.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
+```
+
+### Dependency injection for Redis and settings
+```python
+from fastapi import Depends
+
+def get_redis(request: Request) -> Redis:
+    return request.app.state.redis
+
+@app.get("/health")
+async def health(redis: Redis = Depends(get_redis)) -> HealthResponse:
+    ...
+```
+
+### Response models always typed
+```python
+class HealthResponse(BaseModel):
+    status: Literal["ok", "degraded", "error"]
+    redis_status: Literal["connected", "disconnected"]
+    tracked_symbols: list[str]
+    provider: str
+
+@app.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    ...
+```
+
+---
+
+## Async Redis Patterns
+
+### Always use pipeline for multi-operation writes
+```python
+async def publish_and_cache(self, tick: NormalizedTick) -> None:
+    async with self.redis.pipeline(transaction=False) as pipe:
+        pipe.publish(tick.symbol, tick.model_dump_json())
+        pipe.lpush(f"history:{tick.symbol}", tick.price)
+        pipe.ltrim(f"history:{tick.symbol}", 0, self.max_history - 1)
+        await pipe.execute()
+```
+
+### History reads with explicit type cast
+```python
+async def get_price_history(self, symbol: str, limit: int) -> list[float]:
+    raw: list[bytes] = await self.redis.lrange(f"history:{symbol}", 0, limit - 1)
+    return [float(v) for v in raw]
+```
+
+### Subscriber pattern
+```python
+async def subscribe_and_process(self) -> None:
+    async with self.redis.pubsub() as pubsub:
+        await pubsub.subscribe(*self.symbols)
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            await self._handle_message(message["data"])
+```
+
+---
+
+## Error Handling Hierarchy
+
+```
+Exception (truly unexpected — let it propagate to global handler)
+  └── AppError (base for domain errors — catch at service boundary)
+        ├── TickValidationError     (bad provider payload)
+        ├── InsufficientFundsError  (portfolio can't execute)
+        └── RedisUnavailableError   (connectivity issue)
+```
+
+```python
+# Global FastAPI handler — always register this
+@app.exception_handler(Exception)
+async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+    logger.error("Unhandled exception", exc_info=exc, extra={"path": str(request.url)})
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+```
+
+---
+
+## Logging — Structured, Always
+
+```python
+import logging
+import json
+
+# Use this pattern at module level — never basicConfig in library code
+logger = logging.getLogger(__name__)
+
+# Log with structured extra fields
+logger.info(
+    "Trade executed",
+    extra={"symbol": symbol, "action": action.value, "price": price, "quantity": qty}
+)
+
+# NOT this
+logger.info(f"Trade: {symbol} {action} {price}")  # unstructured, hard to query
+```
+
+Configure JSON logging in `main.py` using `python-json-logger` or structlog.
+Log level from settings: `LOG_LEVEL=INFO` (default), `DEBUG` in dev.
+
+---
+
+## Math & Indicators — Keep It Stdlib
+
+```python
+import statistics
+
+# Use statistics module for simple indicators
+mean = statistics.mean(prices)
+stdev = statistics.stdev(prices)
+z_score = (current_price - mean) / stdev
+
+# Use numpy ONLY if it's already in requirements.txt
+# Do NOT add numpy just for one strategy
+```
+
+Never add a new dependency just to avoid 5 lines of math.
+If numpy is needed (e.g., FFT, matrix ops), add it explicitly to `requirements.txt` with a comment explaining why.
+
+---
+
+## Testing Setup
+
+```python
+# conftest.py
+import pytest
+import fakeredis.aioredis
+
+@pytest.fixture
+async def redis():
+    """In-memory Redis for unit and integration tests. No real Redis needed."""
+    client = fakeredis.aioredis.FakeRedis()
+    yield client
+    await client.aclose()
+
+@pytest.fixture
+def settings():
+    return IngestorSettings(
+        alpaca_api_key="test_key",
+        alpaca_secret_key="test_secret",
+        symbols_to_track=["AAPL"],
+        redis_url="redis://localhost:6379",
+    )
+```
+
+Run tests with:
+```bash
+pytest -x -q --tb=short          # fast feedback during dev
+pytest --cov=engine --cov=ingestor --cov-report=term-missing  # coverage check
+```
+
+---
+
+## Pre-commit Quality Gates
+
+Before finishing any code task, mentally run:
+
+```bash
+# Type checking
+mypy engine/ ingestor/ --strict
+
+# Linting
+ruff check engine/ ingestor/
+
+# Formatting
+ruff format engine/ ingestor/
+
+# Tests
+pytest -x -q
+```
+
+If you're writing code that would fail `mypy --strict`, fix the types — don't add `# type: ignore` unless you can explain why it's truly necessary in a comment.
+
+---
+
+## Checklist — Every PR / Task
+
+- [ ] All functions and methods have full type hints
+- [ ] New domain objects are Pydantic models (not dicts, not dataclasses)
+- [ ] No blocking I/O in async functions
+- [ ] No credentials or URLs hardcoded — settings object only
+- [ ] Errors that are expected failures use `Result[T, E]`, not exceptions
+- [ ] Constants are named and typed at module level
+- [ ] New FastAPI routes have `response_model` set
+- [ ] Structured logging with `extra={}` fields (not f-string soup)
+- [ ] Tests exist for the new code (unit tests minimum, integration if Redis is involved)
+- [ ] No new dependency added without updating `requirements.txt` and a comment
+
+---
+
+## Hard Rules
+
+- ❌ No `print()` in production code — use `logger`
+- ❌ No `time.sleep()` — use `asyncio.sleep()`
+- ❌ No mutable default arguments `def foo(items=[]):`
+- ❌ No bare `except:` — always catch a specific type
+- ❌ No `Any` type unless wrapping a truly untyped third-party library, with a comment
+- ❌ No business logic in `main.py` — it wires things, it doesn't compute things
+- ❌ No cross-service imports — Ingestor and Engine are separate packages

@@ -48,5 +48,12 @@ class ZScoreStrategy(BaseStrategy):
         except Exception as e:
             return Result(error=f"Z-Score Error: {e}")
 
-    def _generate_hold(self, tick, param):
-        pass
+    def _generate_hold(self, tick: NormalizedTick, param: str) -> SignalResult:
+        return SignalResult(
+            symbol=self.symbol,
+            price=tick.price,
+            action=ActionEnum.HOLD,
+            strategy=self.__class__.__name__,
+            timestamp=tick.timestamp,
+            metadata=param,
+        )
