@@ -20,12 +20,12 @@ class BollingerBandsStrategy(BaseStrategy):
             if len(history) < self.period:
                 return Result(value=self._generate_hold(tick, "Building BB history"))
 
-            # חישוב ממוצע (SMA) וסטיית תקן
+            # Calculate mean (SMA) and standard deviation
             sma = sum(history) / self.period
             variance = sum((p - sma) ** 2 for p in history) / self.period
             std_dev = math.sqrt(variance)
 
-            # חישוב הרצועות
+            # Calculate the bands
             upper_band = sma + (self.std_dev_multiplier * std_dev)
             lower_band = sma - (self.std_dev_multiplier * std_dev)
 

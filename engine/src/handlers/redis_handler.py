@@ -20,7 +20,7 @@ class RedisHandler:
 
     async def save_tick_with_volume(self, symbol: str, price: float, quantity: int, max_len: int = 100):
         key = f"history_v:{symbol}"
-        data = f"{price}:{quantity}"  # שומרים זוג של מחיר וכמות
+        data = f"{price}:{quantity}"  # stores a price:volume pair
         async with self._db.pipeline(transaction=True) as pipe:
             await pipe.lpush(key, data)
             await pipe.ltrim(key, 0, max_len - 1)

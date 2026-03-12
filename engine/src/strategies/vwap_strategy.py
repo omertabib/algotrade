@@ -15,10 +15,10 @@ class VWAPStrategy(BaseStrategy):
 
     async def analyze(self, tick: NormalizedTick) -> Result[SignalResult]:
         try:
-            # שלב א': שמירת הטיק עם הנפח שלו ב-Redis
+            # Step A: Save the tick with its volume to Redis
             await self.redis_handler.save_tick_with_volume(tick.symbol, tick.price, tick.quantity, self.period)
 
-            # שלב ב': שליפת היסטוריה משולבת (מחיר:כמות)
+            # Step B: Fetch combined history (price:volume)
             key = f"history_v:{self.symbol}"
             raw_data = await self.redis_handler._db.lrange(key, 0, self.period - 1)
 
@@ -35,7 +35,7 @@ class VWAPStrategy(BaseStrategy):
 
             vwap = total_pv / total_volume
 
-            # לוגיקה: מחיר מעל VWAP הוא שורי (קנייה), מתחת הוא דובי (מכירה)
+            # Logic: price above VWAP is bullish (buy), below is bearish (sell)
             current_action = ActionEnum.BUY if tick.price > vwap else ActionEnum.SELL
 
             if current_action != self.last_signal:

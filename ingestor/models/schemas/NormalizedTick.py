@@ -1,7 +1,5 @@
 from pydantic import BaseModel, Field
 
-from models.dto.AlpacaTick import AlpacaTick
-
 
 class NormalizedTick(BaseModel):
     symbol: str = Field(description="Symbol")

@@ -1,5 +1,4 @@
-from optparse import Option
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 from typing_extensions import TypeVar, Generic
